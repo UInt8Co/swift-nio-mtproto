@@ -48,3 +48,10 @@ The split between modules is worth preserving when adding code:
 - Where behaviour follows Telegram's documentation, cite the page in a comment;
   where it follows what real clients actually do instead, say so, because those
   two things differ often enough to matter.
+- Never cancel a `Task.sleep`. The concurrency runtime leaks a few hundred
+  bytes every time a sleeping task is cancelled and never reclaims it
+  (swiftlang/swift#60441), so a timer on a per-query path grows a long-lived
+  connection without bound. End a wait some other way: let the deadline run
+  itself out and find its entry gone, orphan it with a generation tag, or have a
+  loop read the connection's phase on its next wake. This connection does all
+  three.

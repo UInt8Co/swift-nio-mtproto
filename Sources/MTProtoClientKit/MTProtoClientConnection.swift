@@ -99,7 +99,6 @@ public actor MTProtoClientConnection {
   /// so a per-waiter timeout can resolve exactly its own continuation.
   private struct ReadyWaiter {
     var continuation: CheckedContinuation<Void, Error>
-    var timeoutTask: Task<Void, Never>?
   }
   private var readyWaiters: [UInt64: ReadyWaiter] = [:]
   private var nextWaiterID: UInt64 = 0
@@ -110,21 +109,24 @@ public actor MTProtoClientConnection {
   private struct PendingQuery {
     var body: Data
     var continuation: CheckedContinuation<Data, Error>
-    var timeoutTask: Task<Void, Never>?
   }
   private var pending: [Int64: PendingQuery] = [:]
   /// One in-flight explicit `ping`, keyed by `ping_id`.
   private struct PendingPing {
     var continuation: CheckedContinuation<Void, Error>
-    var timeoutTask: Task<Void, Never>?
   }
   private var pendingPings: [Int64: PendingPing] = [:]
   private var nextPingID: Int64 = 1
 
   /// Server content-message ids awaiting a batched `msgs_ack`.
   private var pendingAcks: [Int64] = []
-  private var ackFlushTask: Task<Void, Never>?
-  private var pingTask: Task<Void, Never>?
+  /// Whether a batched `msgs_ack` is armed, and which arming is current: a
+  /// timer is orphaned by a newer generation rather than cancelled.
+  private var ackFlushArmed = false
+  private var ackFlushGeneration: UInt64 = 0
+  /// Set once the ping loop starts. It ends itself on close, and a closed
+  /// connection never becomes ready again, so it is never unset.
+  private var pingLoopRunning = false
   /// When the current salt stops being valid (0 = unknown/no expiry known);
   /// learned from `future_salts`, drives the proactive refresh.
   private var saltValidUntil: Int64 = 0
@@ -221,14 +223,16 @@ public actor MTProtoClientConnection {
       let id = nextWaiterID
       nextWaiterID += 1
       try await withCheckedThrowingContinuation { continuation in
-        let timeoutTask: Task<Void, Never>? = timeout.map { timeout in
+        readyWaiters[id] = ReadyWaiter(continuation: continuation)
+        // The deadline runs itself out rather than being cancelled: cancelling
+        // a `Task.sleep` leaks (swiftlang/swift#60441), and
+        // `timeOutReadyWaiter` does nothing once the waiter is gone.
+        if let timeout {
           Task { [weak self] in
             try? await Task.sleep(for: timeout)
-            guard !Task.isCancelled else { return }
             await self?.timeOutReadyWaiter(id)
           }
         }
-        readyWaiters[id] = ReadyWaiter(continuation: continuation, timeoutTask: timeoutTask)
       }
     }
   }
@@ -245,24 +249,21 @@ public actor MTProtoClientConnection {
     return try await withCheckedThrowingContinuation { continuation in
       do {
         let msgID = try sendMessage(body: queryBody, contentRelated: true)
-        var query = PendingQuery(body: queryBody, continuation: continuation)
-        query.timeoutTask = armTimeout(for: msgID)
-        pending[msgID] = query
+        pending[msgID] = PendingQuery(body: queryBody, continuation: continuation)
+        armTimeout(for: msgID)
       } catch {
         continuation.resume(throwing: error)
       }
     }
   }
 
-  /// Arms the per-query timeout for `msgID` (nil when no `requestTimeout` is
-  /// configured). The task fires `timeOutQuery(msgID)` once, keyed to the id
-  /// it currently lives under — so a resend must re-arm for the new id
-  /// (``resendQuery(_:)``), or the query would lose its timeout.
-  private func armTimeout(for msgID: Int64) -> Task<Void, Never>? {
-    guard let timeout = configuration.requestTimeout else { return nil }
-    return Task { [weak self] in
+  /// Arms the per-query timeout for `msgID`, keyed to the id the query lives
+  /// under, so a resend re-arms for its new id (``resendQuery(_:)``) and the
+  /// deadline left over from the old one finds nothing and does nothing.
+  private func armTimeout(for msgID: Int64) {
+    guard let timeout = configuration.requestTimeout else { return }
+    Task { [weak self] in
       try? await Task.sleep(for: timeout)
-      guard !Task.isCancelled else { return }
       await self?.timeOutQuery(msgID)
     }
   }
@@ -278,19 +279,18 @@ public actor MTProtoClientConnection {
       do {
         let body = TL.Ping(pingId: pingID).tlSerialized()
         _ = try sendMessage(body: body, contentRelated: false)
-        pendingPings[pingID] = PendingPing(
-          continuation: continuation, timeoutTask: armPingTimeout(for: pingID))
+        pendingPings[pingID] = PendingPing(continuation: continuation)
+        armPingTimeout(for: pingID)
       } catch {
         continuation.resume(throwing: error)
       }
     }
   }
 
-  private func armPingTimeout(for pingID: Int64) -> Task<Void, Never>? {
-    guard let timeout = configuration.requestTimeout else { return nil }
-    return Task { [weak self] in
+  private func armPingTimeout(for pingID: Int64) {
+    guard let timeout = configuration.requestTimeout else { return }
+    Task { [weak self] in
       try? await Task.sleep(for: timeout)
-      guard !Task.isCancelled else { return }
       await self?.timeOutPing(pingID)
     }
   }
@@ -328,7 +328,6 @@ public actor MTProtoClientConnection {
     let waiters = readyWaiters
     readyWaiters.removeAll()
     for (_, waiter) in waiters {
-      waiter.timeoutTask?.cancel()
       waiter.continuation.resume()
     }
     startPingLoopIfNeeded()
@@ -340,23 +339,20 @@ public actor MTProtoClientConnection {
     let waiters = readyWaiters
     readyWaiters.removeAll()
     for (_, waiter) in waiters {
-      waiter.timeoutTask?.cancel()
       waiter.continuation.resume(throwing: error)
     }
     for (_, query) in pending {
-      query.timeoutTask?.cancel()
       query.continuation.resume(throwing: error)
     }
     pending.removeAll()
     for (_, ping) in pendingPings {
-      ping.timeoutTask?.cancel()
       ping.continuation.resume(throwing: error)
     }
     pendingPings.removeAll()
-    pingTask?.cancel()
-    pingTask = nil
-    ackFlushTask?.cancel()
-    ackFlushTask = nil
+    // Nothing here cancels a timer: the ping loop reads the phase on its next
+    // wake, and the armed ack flush is orphaned by the generation bump.
+    ackFlushArmed = false
+    ackFlushGeneration &+= 1
   }
 
   // MARK: - Sending
@@ -380,16 +376,13 @@ public actor MTProtoClientConnection {
   /// `bad_server_salt` / a recoverable `bad_msg_notification` /
   /// `new_session_created` loss recovery).
   private func resendQuery(_ oldMsgID: Int64) {
-    guard var query = pending.removeValue(forKey: oldMsgID) else { return }
-    // The old timeout is keyed to oldMsgID (which no longer exists in
-    // `pending`); cancel it and re-arm for the new id, or the resent query
-    // would silently lose its timeout and could hang forever.
-    query.timeoutTask?.cancel()
+    guard let query = pending.removeValue(forKey: oldMsgID) else { return }
     do {
       let newMsgID = try sendMessage(body: query.body, contentRelated: true)
       log?("client: resent query #\(oldMsgID) as #\(newMsgID)")
-      query.timeoutTask = armTimeout(for: newMsgID)
       pending[newMsgID] = query
+      // The deadline the old id armed is left to expire and find nothing.
+      armTimeout(for: newMsgID)
     } catch {
       query.continuation.resume(throwing: error)
     }
@@ -491,7 +484,6 @@ public actor MTProtoClientConnection {
         _ = try reader.readInt64()  // msg_id of the ping
         let pingID = try reader.readInt64()
         if let ping = pendingPings.removeValue(forKey: pingID) {
-          ping.timeoutTask?.cancel()
           ping.continuation.resume()
         }
 
@@ -587,7 +579,6 @@ public actor MTProtoClientConnection {
       log?("client: rpc_result for unknown #\(reqMsgID)")
       return
     }
-    query.timeoutTask?.cancel()
     var resultReader = TLReader(body)
     if (try? resultReader.peekUInt32()) == MTProtoClientID.rpcError,
       let error = try? TL.RpcError(tlFrom: &resultReader)
@@ -627,23 +618,28 @@ public actor MTProtoClientConnection {
 
   private func scheduleAckFlush() {
     // Large backlogs flush immediately; otherwise batch for a beat so one
-    // msgs_ack covers a burst of server messages.
+    // msgs_ack covers a burst of server messages. An armed timer is orphaned
+    // rather than cancelled: cancelling a `Task.sleep` leaks (swiftlang/swift#60441).
     if pendingAcks.count >= 32 {
-      ackFlushTask?.cancel()
-      ackFlushTask = nil
+      ackFlushArmed = false
+      ackFlushGeneration &+= 1
       flushAcks()
       return
     }
-    guard ackFlushTask == nil else { return }
-    ackFlushTask = Task { [weak self] in
+    guard !ackFlushArmed else { return }
+    ackFlushArmed = true
+    ackFlushGeneration &+= 1
+    let generation = ackFlushGeneration
+    Task { [weak self] in
       try? await Task.sleep(for: .milliseconds(500))
-      guard !Task.isCancelled else { return }
-      await self?.ackFlushDue()
+      await self?.ackFlushDue(generation)
     }
   }
 
-  private func ackFlushDue() {
-    ackFlushTask = nil
+  /// Flushes only for the arming that is still current; an orphan says nothing.
+  private func ackFlushDue(_ generation: UInt64) {
+    guard generation == ackFlushGeneration else { return }
+    ackFlushArmed = false
     flushAcks()
   }
 
@@ -657,14 +653,23 @@ public actor MTProtoClientConnection {
   // MARK: - Ping / salt upkeep
 
   private func startPingLoopIfNeeded() {
-    guard pingTask == nil, let interval = configuration.pingInterval else { return }
-    pingTask = Task { [weak self] in
-      while !Task.isCancelled {
+    guard !pingLoopRunning, let interval = configuration.pingInterval else { return }
+    pingLoopRunning = true
+    // The loop ends on the phase rather than on cancellation: cancelling a
+    // `Task.sleep` leaks (swiftlang/swift#60441).
+    Task { [weak self] in
+      while true {
         try? await Task.sleep(for: interval)
-        guard !Task.isCancelled else { return }
-        await self?.pingTick(interval: interval)
+        guard let self, await self.pingTickUnlessClosed(interval: interval) else { return }
       }
     }
+  }
+
+  /// One turn of the ping loop, answering whether it should sleep again.
+  private func pingTickUnlessClosed(interval: Duration) -> Bool {
+    if case .closed = phase { return false }
+    pingTick(interval: interval)
+    return true
   }
 
   private func pingTick(interval: Duration) {
