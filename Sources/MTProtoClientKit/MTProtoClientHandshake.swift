@@ -23,6 +23,8 @@ public enum MTProtoClientHandshakeError: Error, Equatable {
   case fingerprintNotOffered([Int64])
   /// The server's `pq` challenge was not a factorable ~62-bit semiprime.
   case pqUnfactorable(UInt64)
+  /// `pq` was not an unsigned integer encoded in at most eight bytes.
+  case invalidPQ
   /// The server answered `server_DH_params_fail`.
   case serverDHParamsFailed
   /// The SHA-1 integrity prefix of `server_DH_inner_data` didn't match.
@@ -141,6 +143,11 @@ public struct MTProtoClientHandshake: Sendable {
     serverNonce = resPQ.serverNonce
 
     // The proof-of-work: factor pq into p < q.
+    // Do not truncate an oversized TL string to UInt64: the original bytes
+    // also enter the fixed-size RSA_PAD block later in the handshake.
+    guard !resPQ.pq.isEmpty, resPQ.pq.count <= 8 else {
+      throw MTProtoClientHandshakeError.invalidPQ
+    }
     let pq = resPQ.pq.reduce(UInt64(0)) { $0 << 8 | UInt64($1) }
     guard let (p, q) = PQFactorization.factor(pq) else {
       throw MTProtoClientHandshakeError.pqUnfactorable(pq)

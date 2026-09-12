@@ -18,7 +18,10 @@ the KDF uses. Plaintext bodies (the handshake's, with `auth_key_id = 0`) are
 ``MTProtoPlainMessage``.
 
 A body may arrive compressed as `gzip_packed`, in either direction; unpacking one
-is ``MTProtoGzip/inflate(_:)``.
+is ``MTProtoGzip/inflate(_:maximumOutputSize:)``. Inflation requires a complete
+stream, including its checksum, and defaults to a 16 MiB output limit. Callers
+may pass a different limit; recursive/container dispatch must share a remaining
+budget across sibling and nested compressed bodies.
 
 ## Resuming a session
 

@@ -16,7 +16,7 @@ public struct MTProtoClientInboundValidator: Sendable {
   public enum Rejection: Equatable, Sendable {
     /// Even `msg_id`, or one outside the acceptance time window.
     case badMessageID
-    /// A `msg_id` already processed in this session — a replay.
+    /// A `msg_id` already processed, or at/below the evicted replay window.
     case duplicate
   }
 
@@ -28,7 +28,9 @@ public struct MTProtoClientInboundValidator: Sendable {
   public var maxTrackedIDs: Int
 
   private var seen: Set<Int64> = []
-  private var order: [Int64] = []
+  /// A min-heap retains the greatest ids regardless of arrival order.
+  private var order: [UInt64] = []
+  private var replayFloor: UInt64?
 
   public init(
     pastToleranceSeconds: Int64 = 300,
@@ -44,6 +46,7 @@ public struct MTProtoClientInboundValidator: Sendable {
   public mutating func reset() {
     seen.removeAll(keepingCapacity: true)
     order.removeAll(keepingCapacity: true)
+    replayFloor = nil
   }
 
   /// Validates one inbound `msg_id` (top-level or container-nested; nested
@@ -54,11 +57,33 @@ public struct MTProtoClientInboundValidator: Sendable {
     let messageTime = Int64(UInt64(bitPattern: msgID) >> 32)
     if messageTime < now - pastToleranceSeconds { return .badMessageID }
     if messageTime > now + futureToleranceSeconds { return .badMessageID }
-    if seen.contains(msgID) { return .duplicate }
+    let unsignedID = UInt64(bitPattern: msgID)
+    if seen.contains(msgID) || replayFloor.map({ unsignedID <= $0 }) == true {
+      return .duplicate
+    }
     seen.insert(msgID)
-    order.append(msgID)
-    if order.count > maxTrackedIDs {
-      seen.remove(order.removeFirst())
+    order.append(unsignedID)
+    var index = order.count - 1
+    while index > 0 {
+      let parent = (index - 1) / 2
+      guard order[index] < order[parent] else { break }
+      order.swapAt(index, parent)
+      index = parent
+    }
+    while order.count > max(1, maxTrackedIDs) {
+      let oldest = order[0]
+      replayFloor = oldest
+      seen.remove(Int64(bitPattern: oldest))
+      order[0] = order.removeLast()
+      index = 0
+      while index * 2 + 1 < order.count {
+        let left = index * 2 + 1
+        let right = left + 1
+        let child = right < order.count && order[right] < order[left] ? right : left
+        guard order[child] < order[index] else { break }
+        order.swapAt(child, index)
+        index = child
+      }
     }
     return nil
   }

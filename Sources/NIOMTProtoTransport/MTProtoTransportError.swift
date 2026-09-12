@@ -25,6 +25,9 @@ public enum MTProtoTransportError: Error, Equatable, Sendable, CustomStringConve
   /// ``MTProtoObfuscation/acceptHandshake(received:secret:)``).
   case unrecognizedTransport(tag: UInt32)
 
+  /// The accepting peer did not provide an exact 64-byte obfuscation header.
+  case invalidObfuscationHeaderLength(Int)
+
   public var description: String {
     switch self {
     case .crcMismatch(let expected, let found):
@@ -40,6 +43,8 @@ public enum MTProtoTransportError: Error, Equatable, Sendable, CustomStringConve
       return "MTProtoTransportError.obfuscationUnsupported: \(transport)"
     case .unrecognizedTransport(let tag):
       return "MTProtoTransportError.unrecognizedTransport: 0x\(String(tag, radix: 16))"
+    case .invalidObfuscationHeaderLength(let length):
+      return "MTProtoTransportError.invalidObfuscationHeaderLength: \(length)"
     }
   }
 }

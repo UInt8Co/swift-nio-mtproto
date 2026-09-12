@@ -18,7 +18,14 @@ client.invoke(…)` never sees any of it:
   wrappers are unpacked before dispatch.
 - **Inbound validation and dedup.** ``MTProtoClientInboundValidator`` applies the
   mirror image of the server's checks to what arrives, so a duplicated or
-  out-of-window message cannot be delivered twice.
+  out-of-window message cannot be delivered twice. Eviction retains a lower
+  bound on accepted ids, so filling the bounded cache cannot re-enable an old
+  captured message.
+- **Inbound resource limits.** Containers allow at most 1024 messages; wrapper
+  nesting stops at 32 levels and each received envelope shares a 16 MiB
+  inflation budget. The channel closes if pending processing exceeds 32 MiB or
+  1024 messages. Handshake `pq` inputs are at most eight bytes, and factorization
+  bounds both polynomial retries and their iteration counts.
 - **Salts.** `bad_server_salt`, `new_session_created` and `future_salts` all
   carry a salt to adopt; the request that triggered a `bad_server_salt` is
   retried with the corrected one rather than surfaced as a failure.

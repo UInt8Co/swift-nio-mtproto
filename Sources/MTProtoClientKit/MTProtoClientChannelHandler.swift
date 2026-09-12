@@ -20,9 +20,20 @@ final class MTProtoClientChannelHandler: ChannelInboundHandler {
   private let connection: MTProtoClientConnection
   /// Tail of the serial processing chain; each read awaits the previous.
   private var tail: Task<Void, Never>?
+  private let maximumPendingBytes: Int
+  private let maximumPendingMessages: Int
+  private var pendingBytes = 0
+  private var pendingMessages = 0
+  private var closing = false
 
-  init(connection: MTProtoClientConnection) {
+  init(
+    connection: MTProtoClientConnection,
+    maximumPendingBytes: Int = 32 << 20,
+    maximumPendingMessages: Int = 1024
+  ) {
     self.connection = connection
+    self.maximumPendingBytes = maximumPendingBytes
+    self.maximumPendingMessages = maximumPendingMessages
   }
 
   func channelActive(context: ChannelHandlerContext) {
@@ -42,16 +53,37 @@ final class MTProtoClientChannelHandler: ChannelInboundHandler {
   }
 
   func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-    let payload = Data(unwrapInboundIn(data).readableBytesView)
+    guard !closing else { return }
+    let buffer = unwrapInboundIn(data)
+    // Framing limits each packet, but the actor may process packets more
+    // slowly than the network receives them. Bound retained bytes and Tasks
+    // before copying the next payload into the serial processing chain.
+    guard buffer.readableBytes <= maximumPendingBytes - pendingBytes,
+      pendingMessages < maximumPendingMessages
+    else {
+      closing = true
+      context.close(promise: nil)
+      return
+    }
+    let payload = Data(buffer.readableBytesView)
+    pendingBytes += payload.count
+    pendingMessages += 1
     let connection = self.connection
     let previous = tail
+    let handler = NIOLoopBound(self, eventLoop: context.eventLoop)
+    let eventLoop = context.eventLoop
     tail = Task {
       await previous?.value
       await connection.handleInbound(payload)
+      eventLoop.execute {
+        handler.value.pendingBytes -= payload.count
+        handler.value.pendingMessages -= 1
+      }
     }
   }
 
   func channelInactive(context: ChannelHandlerContext) {
+    closing = true
     let connection = self.connection
     let previous = tail
     tail = Task {
@@ -59,5 +91,10 @@ final class MTProtoClientChannelHandler: ChannelInboundHandler {
       await connection.channelInactive()
     }
     context.fireChannelInactive()
+  }
+
+  func errorCaught(context: ChannelHandlerContext, error: Error) {
+    closing = true
+    context.close(promise: nil)
   }
 }

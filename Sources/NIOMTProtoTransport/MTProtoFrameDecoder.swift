@@ -69,7 +69,7 @@ public struct MTProtoFrameDecoder: ByteToMessageDecoder {
       headerLength = 1
       payloadLength = Int(first & 0x7f) * 4
     }
-    guard payloadLength <= maximumFrameLength else {
+    guard payloadLength >= 4, payloadLength <= maximumFrameLength else {
       throw MTProtoTransportError.invalidFrameLength(payloadLength)
     }
     guard buffer.readableBytes >= headerLength + payloadLength else {
@@ -93,7 +93,7 @@ public struct MTProtoFrameDecoder: ByteToMessageDecoder {
     }
     // The top bit, if set, is the quick-ack marker rather than a length bit.
     let payloadLength = Int(lengthField & 0x7fff_ffff)
-    guard payloadLength <= maximumFrameLength else {
+    guard payloadLength >= 4, payloadLength <= maximumFrameLength else {
       throw MTProtoTransportError.invalidFrameLength(payloadLength)
     }
     guard buffer.readableBytes >= 4 + payloadLength else { return .needMoreData }
@@ -114,7 +114,7 @@ public struct MTProtoFrameDecoder: ByteToMessageDecoder {
     }
     let length = Int(length32)
     // length covers the length field, the seqno, the payload and the CRC.
-    guard length >= 12, length <= maximumFrameLength else {
+    guard length >= 16, length <= maximumFrameLength else {
       throw MTProtoTransportError.invalidFrameLength(length)
     }
     guard buffer.readableBytes >= length else { return .needMoreData }

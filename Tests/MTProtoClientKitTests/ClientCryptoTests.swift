@@ -71,5 +71,15 @@ import Testing
     // A prime: rho can never split it.
     #expect(PQFactorization.factor(2_147_483_647) == nil)
     #expect(PQFactorization.factor(1) == nil)
+    #expect(PQFactorization.factor(18_446_744_073_709_551_557) == nil)
+    #expect(PQFactorization.factor(UInt64.max) == nil)
+  }
+
+  @Test func factorsFullWidthSemiprime() throws {
+    let p: UInt64 = 4_294_967_291
+    let q: UInt64 = 4_294_967_279
+    let factors = try #require(PQFactorization.factor(p * q))
+    #expect(UInt64(factors.p) == q)
+    #expect(UInt64(factors.q) == p)
   }
 }

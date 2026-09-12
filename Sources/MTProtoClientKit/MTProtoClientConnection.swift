@@ -417,9 +417,11 @@ public actor MTProtoClientConnection {
       log?("client: dropping server message \(message.msgID): \(rejection)")
       return
     }
+    var remainingInflatedBytes = 1 << 24
     handleBody(
       message.body, msgID: message.msgID, seqNo: message.seqNo,
-      envelopeMsgID: message.msgID, recordAck: true)
+      envelopeMsgID: message.msgID, recordAck: true, depth: 0,
+      remainingInflatedBytes: &remainingInflatedBytes)
   }
 
   /// Processes one message body. `msgID`/`seqNo` are the message's own
@@ -429,8 +431,13 @@ public actor MTProtoClientConnection {
   /// the `gzip_packed` re-entry passes false so the same id is not acked
   /// twice.
   private func handleBody(
-    _ body: Data, msgID: Int64, seqNo: Int32, envelopeMsgID: Int64, recordAck: Bool
+    _ body: Data, msgID: Int64, seqNo: Int32, envelopeMsgID: Int64, recordAck: Bool,
+    depth: Int, remainingInflatedBytes: inout Int
   ) {
+    guard depth < 32 else {
+      log?("client: dropping excessively nested message #\(msgID)")
+      return
+    }
     // Every content-related server message must be acknowledged (batched).
     if recordAck, seqNo % 2 == 1 {
       pendingAcks.append(msgID)
@@ -450,9 +457,10 @@ public actor MTProtoClientConnection {
         // `0..<count` (an uncatchable fatalError the enclosing do/catch can't
         // recover); treat it as a malformed message and drop it.
         let count = try reader.readInt32()
-        guard count >= 0 else {
-          log?("client: dropping msg_container with negative count \(count)")
-          return
+        // MTProto limits containers to 1024 messages. Every entry needs a
+        // 16-byte header and at least one 4-byte constructor.
+        guard count >= 0, count <= 1024, Int(count) <= reader.bytesRemaining / 20 else {
+          throw MTProtoClientSessionError.badEnvelope
         }
         for _ in 0..<count {
           let leafMsgID = try reader.readInt64()
@@ -466,19 +474,22 @@ public actor MTProtoClientConnection {
           }
           handleBody(
             leafBody, msgID: leafMsgID, seqNo: leafSeqNo, envelopeMsgID: envelopeMsgID,
-            recordAck: true)
+            recordAck: true, depth: depth + 1, remainingInflatedBytes: &remainingInflatedBytes)
         }
 
       case MTProtoClientID.gzipPacked:
-        let inflated = try MTProtoGzip.inflate(try reader.readBytes())
+        let inflated = try MTProtoGzip.inflate(
+          try reader.readBytes(), maximumOutputSize: remainingInflatedBytes)
+        remainingInflatedBytes -= inflated.count
         handleBody(
           inflated, msgID: msgID, seqNo: seqNo, envelopeMsgID: envelopeMsgID,
-          recordAck: false)
+          recordAck: false, depth: depth + 1, remainingInflatedBytes: &remainingInflatedBytes)
 
       case MTProtoClientID.rpcResult:
         let reqMsgID = try reader.readInt64()
         let result = try reader.readRawBytes(reader.bytesRemaining)
-        handleRPCResult(reqMsgID: reqMsgID, result: result)
+        handleRPCResult(
+          reqMsgID: reqMsgID, result: result, remainingInflatedBytes: &remainingInflatedBytes)
 
       case MTProtoClientID.pong:
         _ = try reader.readInt64()  // msg_id of the ping
@@ -562,17 +573,23 @@ public actor MTProtoClientConnection {
     }
   }
 
-  private func handleRPCResult(reqMsgID: Int64, result: Data) {
+  private func handleRPCResult(reqMsgID: Int64, result: Data, remainingInflatedBytes: inout Int) {
+    guard pending[reqMsgID] != nil else {
+      log?("client: rpc_result for unknown #\(reqMsgID)")
+      return
+    }
     var body = result
     // The result object itself may be gzip-wrapped.
     var reader = TLReader(body)
     if (try? reader.peekUInt32()) == MTProtoClientID.gzipPacked {
       _ = try? reader.readUInt32()
-      guard let packed = try? reader.readBytes(), let inflated = try? MTProtoGzip.inflate(packed)
+      guard let packed = try? reader.readBytes(),
+        let inflated = try? MTProtoGzip.inflate(packed, maximumOutputSize: remainingInflatedBytes)
       else {
         log?("client: dropping undecodable gzip_packed rpc_result #\(reqMsgID)")
         return
       }
+      remainingInflatedBytes -= inflated.count
       body = inflated
     }
     guard let query = pending.removeValue(forKey: reqMsgID) else {

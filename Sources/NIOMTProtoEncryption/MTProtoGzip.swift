@@ -13,14 +13,19 @@ import CZlib
 /// unpacking one is part of reading the message layer. Only inflate is needed:
 /// compressing outbound bodies is optional and no peer requires it.
 public enum MTProtoGzip {
-  public enum Error: Swift.Error {
+  public enum Error: Swift.Error, Equatable {
     case initFailed(Int32)
     case inflateFailed(Int32)
+    case inputTooLarge
+    case outputLimitExceeded(Int)
   }
 
-  /// Inflates a gzip- (or zlib-) compressed buffer.
-  public static func inflate(_ input: Data) throws -> Data {
-    if input.isEmpty { return Data() }
+  /// Inflates a complete gzip- (or zlib-) compressed buffer, limiting its
+  /// expanded size before appending each output chunk. Callers processing
+  /// nested wrappers should share a budget across all expansions.
+  public static func inflate(_ input: Data, maximumOutputSize: Int = 1 << 24) throws -> Data {
+    guard maximumOutputSize >= 0 else { throw Error.outputLimitExceeded(maximumOutputSize) }
+    guard input.count <= Int(uInt.max) else { throw Error.inputTooLarge }
 
     var stream = z_stream()
     // 15 (max window) + 32 → automatic gzip/zlib header detection.
@@ -49,12 +54,18 @@ public enum MTProtoGzip {
           }
           return chunkSize - Int(stream.avail_out)
         }
+        guard produced <= maximumOutputSize - output.count else {
+          throw Error.outputLimitExceeded(maximumOutputSize)
+        }
         if produced > 0 { output.append(contentsOf: chunk[0..<produced]) }
-      } while status != Z_STREAM_END && stream.avail_in > 0
+        // Even after input is consumed, zlib may have buffered output. Keep
+        // draining it until the checksum/trailer has been verified; truncated
+        // input eventually returns Z_BUF_ERROR instead of a partial success.
+      } while status != Z_STREAM_END
       return status
     }
 
-    guard result == Z_STREAM_END || result == Z_OK else {
+    guard result == Z_STREAM_END else {
       throw Error.inflateFailed(result)
     }
     return output

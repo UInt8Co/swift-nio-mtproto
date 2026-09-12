@@ -145,6 +145,22 @@ func roundTrip(_ transport: MTProtoTransport) throws {
 
 // MARK: - Transport-level errors
 
+@Test(arguments: MTProtoTransport.allCases)
+func rejectsEmptyFramesBeforeReadingPayload(_ transport: MTProtoTransport) {
+  let wire: [UInt8] =
+    transport == .abridged ? [0] : (transport == .full ? [12, 0, 0, 0] : [0, 0, 0, 0])
+  #expect(throws: MTProtoTransportError.invalidFrameLength(transport == .full ? 12 : 0)) {
+    try decode(wire, transport)
+  }
+}
+
+@Test(arguments: [0, 1, 63, 65, 1024])
+func rejectsMalformedObfuscationHeaderLengths(_ count: Int) {
+  #expect(throws: MTProtoTransportError.invalidObfuscationHeaderLength(count)) {
+    try MTProtoObfuscation.acceptHandshake(received: [UInt8](repeating: 0, count: count))
+  }
+}
+
 @Test func decodesNegativeErrorCode() throws {
   // -404 little-endian, framed as a 4-byte intermediate packet.
   let code = Int32(-404)

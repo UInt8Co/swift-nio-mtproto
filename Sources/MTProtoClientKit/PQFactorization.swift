@@ -15,26 +15,63 @@ public enum PQFactorization {
       let other = pq / small
       return factorPair(small, other)
     }
+    // resPQ is unauthenticated. A large prime can make rho's cycle finding
+    // run for billions of iterations, so rule primes out first.
+    guard !isPrime(pq) else { return nil }
 
     var addend: UInt64 = 1
-    // Each polynomial retry is vanishingly unlikely to be needed; the bound
-    // only guards against spinning forever on a prime (non-semiprime) input.
+    // Bound each polynomial as well as the retries. Bounding only the outer
+    // loop does not bound work spent inside a hostile challenge's first cycle.
     while addend <= 32 {
-      func step(_ x: UInt64) -> UInt64 { (mulmod(x, x, pq) &+ addend) % pq }
+      func step(_ x: UInt64) -> UInt64 {
+        UInt64((UInt128(mulmod(x, x, pq)) + UInt128(addend)) % UInt128(pq))
+      }
       var x: UInt64 = 2
       var y: UInt64 = 2
       var divisor: UInt64 = 1
-      while divisor == 1 {
+      var iterations = 0
+      while divisor == 1, iterations < 131_072 {
         x = step(x)
         y = step(step(y))
         divisor = gcd(x > y ? x - y : y - x, pq)
+        iterations += 1
       }
-      if divisor != pq {
+      if divisor > 1, divisor != pq {
         return factorPair(divisor, pq / divisor)
       }
       addend += 1  // unlucky cycle; retry with a different polynomial
     }
     return nil
+  }
+
+  /// Deterministic Miller–Rabin for all UInt64 inputs. These seven witnesses
+  /// cover the complete range, including primes close to UInt64.max.
+  private static func isPrime(_ value: UInt64) -> Bool {
+    var d = value - 1
+    let shifts = d.trailingZeroBitCount
+    d >>= shifts
+    for witness: UInt64 in [2, 325, 9375, 28178, 450775, 9_780_504, 1_795_265_022] {
+      var base = witness % value
+      if base == 0 { continue }
+      var exponent = d
+      var x: UInt64 = 1
+      while exponent > 0 {
+        if exponent & 1 == 1 { x = mulmod(x, base, value) }
+        base = mulmod(base, base, value)
+        exponent >>= 1
+      }
+      if x == 1 || x == value - 1 { continue }
+      var passed = false
+      for _ in 1..<shifts {
+        x = mulmod(x, x, value)
+        if x == value - 1 {
+          passed = true
+          break
+        }
+      }
+      if !passed { return false }
+    }
+    return true
   }
 
   /// Orders and narrows a factor pair, rejecting non-prime or >32-bit

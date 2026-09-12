@@ -81,6 +81,11 @@ let package = Package(
       name: "MTProtoClientKitTests",
       dependencies: [
         "MTProtoClientKit",
+        "NIOMTProtoEncryption",
+        .product(name: "NIOCore", package: "swift-nio"),
+        .product(name: "NIOEmbedded", package: "swift-nio"),
+        .product(name: "TLCoding", package: "swift-mtproto"),
+        .product(name: "MTProtoBaseSchema", package: "swift-mtproto"),
         .product(name: "MTProtoCrypto", package: "swift-mtproto"),
         .product(name: "Crypto", package: "swift-crypto"),
       ]

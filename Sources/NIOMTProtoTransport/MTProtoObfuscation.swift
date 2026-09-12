@@ -182,7 +182,9 @@ public enum MTProtoObfuscation {
   public static func acceptHandshake(
     received: [UInt8], secret: Data? = nil
   ) throws -> AcceptedHandshake {
-    precondition(received.count == 64, "obfuscation init must be 64 bytes")
+    guard received.count == 64 else {
+      throw MTProtoTransportError.invalidObfuscationHeaderLength(received.count)
+    }
 
     // The initiator's encryption key/IV (= our decryption key/IV).
     var decKey = Data(received[8..<40])
