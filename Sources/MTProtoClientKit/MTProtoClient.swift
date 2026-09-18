@@ -117,6 +117,11 @@ public final class MTProtoClient: Sendable {
     try await connection.invoke(queryBody)
   }
 
+  /// Non-secret binding for an application proof tied to this live session.
+  public func sessionBinding() async -> MTProtoSessionBinding? {
+    await connection.sessionBinding()
+  }
+
   /// One explicit `ping` round-trip.
   public func ping() async throws {
     try await connection.ping()

@@ -237,6 +237,12 @@ public actor MTProtoClientConnection {
     }
   }
 
+  /// The authenticated transport binding, only while the connection is ready.
+  public func sessionBinding() -> MTProtoSessionBinding? {
+    guard case .ready = phase else { return nil }
+    return MTProtoSessionBinding(authKeyID: crypto.authKeyID, sessionID: crypto.sessionID)
+  }
+
   private func timeOutReadyWaiter(_ id: UInt64) {
     guard let waiter = readyWaiters.removeValue(forKey: id) else { return }
     waiter.continuation.resume(throwing: MTProtoClientError.timeout)

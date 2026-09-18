@@ -1,5 +1,9 @@
 # swift-nio-mtproto
 
+Applications can use `MTProtoClient.sessionBinding()` to bind authentication
+proofs to the current transport. It exposes only the auth-key and session IDs;
+reconnecting creates a new session ID even when the auth key is resumed.
+
 [![](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2FUInt8Co%2Fswift-nio-mtproto%2Fbadge%3Ftype%3Dplatforms)](https://swiftpackageindex.com/UInt8Co/swift-nio-mtproto)
 [![](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2FUInt8Co%2Fswift-nio-mtproto%2Fbadge%3Ftype%3Dswift-versions)](https://swiftpackageindex.com/UInt8Co/swift-nio-mtproto)
 
