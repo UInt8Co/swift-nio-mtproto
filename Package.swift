@@ -1,4 +1,4 @@
-// swift-tools-version: 6.3
+// swift-tools-version: 6.4
 
 import PackageDescription
 
@@ -12,8 +12,8 @@ let package = Package(
   ],
   dependencies: [
     .package(url: "https://github.com/UInt8Co/swift-mtproto.git", from: "2.0.0"),
-    .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
-    .package(url: "https://github.com/apple/swift-nio.git", from: "2.100.0"),
+    .package(url: "https://github.com/apple/swift-crypto.git", from: "5.0.0"),
+    .package(url: "https://github.com/apple/swift-nio.git", from: "2.103.0"),
   ],
   targets: [
     // A tiny C shim over the system zlib, used by ``MTProtoGzip``.

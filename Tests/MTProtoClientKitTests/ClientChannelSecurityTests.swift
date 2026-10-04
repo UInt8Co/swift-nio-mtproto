@@ -27,10 +27,10 @@ import Testing
       payload.writeInteger(Int64(1))
       // One event-loop turn: actor completions cannot release capacity in
       // the middle of this incoming batch.
-      channel.pipeline.fireChannelRead(NIOAny(payload))
-      channel.pipeline.fireChannelRead(NIOAny(payload))
+      channel.pipeline.fireChannelRead(payload)
+      channel.pipeline.fireChannelRead(payload)
       let activeBeforeLimit = channel.isActive
-      channel.pipeline.fireChannelRead(NIOAny(payload))
+      channel.pipeline.fireChannelRead(payload)
       return activeBeforeLimit && !channel.isActive
     }.get()
     #expect(stayedWithinLimit)

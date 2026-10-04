@@ -75,7 +75,7 @@ added to your checkout, or Xcode's *Build Documentation*.) The sources are
 
 ## Platforms
 
-macOS 15+, iOS 18+, tvOS 18+, watchOS 11+, and Linux (glibc or musl). Swift 6.3
+macOS 15+, iOS 18+, tvOS 18+, watchOS 11+, and Linux (glibc or musl). Swift 6.4
 toolchain, language mode 6 — there is no support for earlier language modes.
 
 ## Tests
