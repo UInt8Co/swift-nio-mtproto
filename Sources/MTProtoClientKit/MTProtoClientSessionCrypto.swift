@@ -103,10 +103,10 @@ public struct MTProtoClientSessionCrypto: Sendable {
   }
 
   /// Rotates to a fresh (random) session id and resets the content sequence
-  /// counter — on resume, and on `bad_msg_notification` code 17.
+  /// counter — on resume, and on `bad_msg_notification` codes 17/32/33.
   ///
-  /// `lastMsgID` is also reset so the next `msg_id` reflects the *current*
-  /// (possibly just-corrected) clock. Without this, `bad_msg_notification`
+  /// `lastMsgID` is reset when outside the current second, so the next id
+  /// reflects the corrected clock. Without this, `bad_msg_notification`
   /// code 17 recovery is a no-op: after `updateTimeOffset` lowers the clock,
   /// `nextMsgID`'s strict-monotonic clamp (`lastMsgID + 4`) would keep
   /// re-emitting an id near the rejected too-high one. Safe because every
@@ -116,7 +116,8 @@ public struct MTProtoClientSessionCrypto: Sendable {
     var rng = SystemRandomNumberGenerator()
     sessionID = Int64(bitPattern: rng.next())
     contentSeqNo = 0
-    lastMsgID = 0
+    // Keep IDs fresh if the corrected clock is still in the same second.
+    if lastMsgID >> 32 != UInt64(bitPattern: adjustedNow) { lastMsgID = 0 }
   }
 
   /// Re-anchors the server-time estimate from an authenticated server

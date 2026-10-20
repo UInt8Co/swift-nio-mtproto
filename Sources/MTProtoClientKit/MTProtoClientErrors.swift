@@ -23,7 +23,7 @@ public enum MTProtoClientError: Error, Equatable, Sendable {
   /// resumed key and re-handshake.
   case protocolError(Int32)
   /// The server rejected a message with a non-recoverable
-  /// `bad_msg_notification` code (18/19/32–35/64): a client bug, fatal for
+  /// `bad_msg_notification` code (18/19/34/35/64): a client bug, fatal for
   /// the connection.
   case fatalBadMessage(code: Int32)
 }

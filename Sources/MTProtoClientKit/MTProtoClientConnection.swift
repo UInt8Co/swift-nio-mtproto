@@ -109,13 +109,17 @@ public actor MTProtoClientConnection {
   private struct PendingQuery {
     var body: Data
     var continuation: CheckedContinuation<Data, Error>
+    var timeoutGeneration: UInt64 = 0
   }
   private var pending: [Int64: PendingQuery] = [:]
+  private var nextTimeoutGeneration: UInt64 = 0
   /// One in-flight explicit `ping`, keyed by `ping_id`.
   private struct PendingPing {
+    var msgID: Int64
     var continuation: CheckedContinuation<Void, Error>
   }
   private var pendingPings: [Int64: PendingPing] = [:]
+  private var pingIDsByMessageID: [Int64: Int64] = [:]
   private var nextPingID: Int64 = 1
 
   /// Server content-message ids awaiting a batched `msgs_ack`.
@@ -184,9 +188,7 @@ public actor MTProtoClientConnection {
       case .message(let message):
         handleMessage(message)
       case .protocolError(let code):
-        log?("client: transport protocol error \(code)")
-        failAll(.protocolError(code))
-        closeTransport?()
+        transportProtocolError(code)
       }
     } catch let error as MTProtoClientSessionError {
       if case .handshakeRejected(let reason) = error {
@@ -200,6 +202,14 @@ public actor MTProtoClientConnection {
     } catch {
       log?("client: dropping inbound payload: \(error)")
     }
+  }
+
+  /// Also used when the framing layer surfaces a server error before a raw
+  /// four-byte payload can reach the crypto layer.
+  func transportProtocolError(_ code: Int32) {
+    log?("client: transport protocol error \(code)")
+    failAll(.protocolError(code))
+    closeTransport?()
   }
 
   // MARK: - Public API
@@ -265,12 +275,16 @@ public actor MTProtoClientConnection {
 
   /// Arms the per-query timeout for `msgID`, keyed to the id the query lives
   /// under, so a resend re-arms for its new id (``resendQuery(_:)``) and the
-  /// deadline left over from the old one finds nothing and does nothing.
+  /// deadline left over from the old one does nothing. A generation also
+  /// distinguishes IDs reused after a protocol-session reset.
   private func armTimeout(for msgID: Int64) {
     guard let timeout = configuration.requestTimeout else { return }
+    let generation = nextTimeoutGeneration
+    nextTimeoutGeneration &+= 1
+    pending[msgID]?.timeoutGeneration = generation
     Task { [weak self] in
       try? await Task.sleep(for: timeout)
-      await self?.timeOutQuery(msgID)
+      await self?.timeOutQuery(msgID, generation: generation)
     }
   }
 
@@ -284,8 +298,9 @@ public actor MTProtoClientConnection {
     try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
       do {
         let body = TL.Ping(pingId: pingID).tlSerialized()
-        _ = try sendMessage(body: body, contentRelated: false)
-        pendingPings[pingID] = PendingPing(continuation: continuation)
+        let msgID = try sendMessage(body: body, contentRelated: false)
+        pendingPings[pingID] = PendingPing(msgID: msgID, continuation: continuation)
+        pingIDsByMessageID[msgID] = pingID
         armPingTimeout(for: pingID)
       } catch {
         continuation.resume(throwing: error)
@@ -301,8 +316,14 @@ public actor MTProtoClientConnection {
     }
   }
 
+  private func removePing(_ pingID: Int64) -> PendingPing? {
+    guard let ping = pendingPings.removeValue(forKey: pingID) else { return nil }
+    pingIDsByMessageID.removeValue(forKey: ping.msgID)
+    return ping
+  }
+
   private func timeOutPing(_ pingID: Int64) {
-    guard let ping = pendingPings.removeValue(forKey: pingID) else { return }
+    guard let ping = removePing(pingID) else { return }
     ping.continuation.resume(throwing: MTProtoClientError.timeout)
   }
 
@@ -355,6 +376,7 @@ public actor MTProtoClientConnection {
       ping.continuation.resume(throwing: error)
     }
     pendingPings.removeAll()
+    pingIDsByMessageID.removeAll()
     // Nothing here cancels a timer: the ping loop reads the phase on its next
     // wake, and the armed ack flush is orphaned by the generation bump.
     ackFlushArmed = false
@@ -383,6 +405,10 @@ public actor MTProtoClientConnection {
   /// `new_session_created` loss recovery).
   private func resendQuery(_ oldMsgID: Int64) {
     guard let query = pending.removeValue(forKey: oldMsgID) else { return }
+    sendQuery(query, replacing: oldMsgID)
+  }
+
+  private func sendQuery(_ query: PendingQuery, replacing oldMsgID: Int64) {
     do {
       let newMsgID = try sendMessage(body: query.body, contentRelated: true)
       log?("client: resent query #\(oldMsgID) as #\(newMsgID)")
@@ -394,16 +420,55 @@ public actor MTProtoClientConnection {
     }
   }
 
-  private func timeOutQuery(_ msgID: Int64) {
-    guard let query = pending.removeValue(forKey: msgID) else { return }
+  /// Service-message corrections identify the outbound message, not the ping
+  /// token. Keep that index current while preserving the original ping deadline.
+  /// https://core.telegram.org/mtproto/service_messages_about_messages
+  private func resendPendingMessage(_ msgID: Int64) {
+    if let pingID = pingIDsByMessageID[msgID], let ping = removePing(pingID) {
+      sendPing(ping, id: pingID)
+    } else {
+      resendQuery(msgID)
+    }
+  }
+
+  private func sendPing(_ ping: PendingPing, id: Int64) {
+    do {
+      let msgID = try sendMessage(body: TL.Ping(pingId: id).tlSerialized(), contentRelated: false)
+      pendingPings[id] = PendingPing(msgID: msgID, continuation: ping.continuation)
+      pingIDsByMessageID[msgID] = id
+    } catch {
+      ping.continuation.resume(throwing: error)
+    }
+  }
+
+  private func resendAllPendingMessages() {
+    // A new session can reuse old message IDs. Drain both indexes first so a
+    // resend cannot overwrite another waiter; query timers also carry a generation.
+    let queries = pending.sorted { UInt64(bitPattern: $0.key) < UInt64(bitPattern: $1.key) }
+    let pings = pendingPings.sorted {
+      UInt64(bitPattern: $0.value.msgID) < UInt64(bitPattern: $1.value.msgID)
+    }
+    pending.removeAll()
+    pendingPings.removeAll()
+    pingIDsByMessageID.removeAll()
+    for (msgID, query) in queries { sendQuery(query, replacing: msgID) }
+    for (pingID, ping) in pings { sendPing(ping, id: pingID) }
+  }
+
+  private func timeOutQuery(_ msgID: Int64, generation: UInt64) {
+    guard pending[msgID]?.timeoutGeneration == generation,
+      let query = pending.removeValue(forKey: msgID)
+    else { return }
     log?("client: query #\(msgID) timed out")
     query.continuation.resume(throwing: MTProtoClientError.timeout)
   }
 
-  /// The in-flight query ids in ascending *unsigned* (msg_id) order — the
+  /// The in-flight message ids in ascending *unsigned* (msg_id) order — the
   /// order they were actually sent (msg_id = unixtime << 32).
   private func pendingKeysAscending() -> [Int64] {
-    pending.keys.sorted { UInt64(bitPattern: $0) < UInt64(bitPattern: $1) }
+    (Array(pending.keys) + Array(pingIDsByMessageID.keys)).sorted {
+      UInt64(bitPattern: $0) < UInt64(bitPattern: $1)
+    }
   }
 
   // MARK: - Inbound messages
@@ -500,7 +565,7 @@ public actor MTProtoClientConnection {
       case MTProtoClientID.pong:
         _ = try reader.readInt64()  // msg_id of the ping
         let pingID = try reader.readInt64()
-        if let ping = pendingPings.removeValue(forKey: pingID) {
+        if let ping = removePing(pingID) {
           ping.continuation.resume()
         }
 
@@ -512,7 +577,7 @@ public actor MTProtoClientConnection {
         log?("client: bad_server_salt for #\(badMsgID); adopting new salt")
         crypto.adoptSalt(newSalt)
         saltValidUntil = 0
-        resendQuery(badMsgID)
+        resendPendingMessage(badMsgID)
 
       case MTProtoClientID.badMsgNotification:
         let badMsgID = try reader.readInt64()
@@ -527,14 +592,14 @@ public actor MTProtoClientConnection {
         log?("client: new_session_created (salt=\(serverSalt))")
         crypto.adoptSalt(serverSalt)
         saltValidUntil = 0
-        // Queries sent before the session's first server-visible message may
+        // Awaited messages sent before the first server-visible message may
         // have been lost (e.g. a server restart); resend them. msg_ids are
         // ordered *unsigned* (unixtime << 32), so compare as UInt64 — a
         // signed compare would misclassify ids once the high bit sets (2038).
         let firstUnsigned = UInt64(bitPattern: firstMsgID)
         for oldMsgID in pendingKeysAscending()
         where UInt64(bitPattern: oldMsgID) < firstUnsigned {
-          resendQuery(oldMsgID)
+          resendPendingMessage(oldMsgID)
         }
 
       case MTProtoClientID.futureSalts:
@@ -620,17 +685,17 @@ public actor MTProtoClientConnection {
       // msg_id too low / stale: re-anchor our clock estimate on the server's
       // (authenticated) reply id and resend under a fresh id.
       crypto.updateTimeOffset(fromServerMsgID: envelopeMsgID)
-      resendQuery(badMsgID)
-    case 17:
-      // msg_id too far in the future: fix the clock estimate and recreate the
-      // session, resending everything in flight.
+      resendPendingMessage(badMsgID)
+    case 17, 32, 33:
+      // A future msg_id or inconsistent seq_no needs a fresh session and
+      // sequence counter; resend every waiter, including explicit pings.
       crypto.updateTimeOffset(fromServerMsgID: envelopeMsgID)
       crypto.startNewSession()
       validator.reset()
       pendingAcks.removeAll()
-      for oldMsgID in pendingKeysAscending() { resendQuery(oldMsgID) }
+      resendAllPendingMessages()
     default:
-      // 18/19/32–35/64…: a malformed message or a broken seq_no/session — a
+      // 18/19/34/35/64…: a malformed message or a broken seq_no/session — a
       // client bug, fatal for the connection (protocol §6).
       failAll(.fatalBadMessage(code: errorCode))
       closeTransport?()

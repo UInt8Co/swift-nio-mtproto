@@ -1,4 +1,5 @@
 import NIOCore
+import NIOMTProtoTransport
 
 #if canImport(FoundationEssentials)
   import FoundationEssentials
@@ -94,7 +95,18 @@ final class MTProtoClientChannelHandler: ChannelInboundHandler {
   }
 
   func errorCaught(context: ChannelHandlerContext, error: Error) {
+    guard !closing else { return }
     closing = true
+    if case .serverError(let code) = error as? MTProtoTransportError {
+      // The frame decoder surfaces -404/-429/etc. as errors, not payloads.
+      // Preserve that evidence before channelInactive fails remaining waiters.
+      let connection = self.connection
+      let previous = tail
+      tail = Task {
+        await previous?.value
+        await connection.transportProtocolError(0 &- code)
+      }
+    }
     context.close(promise: nil)
   }
 }

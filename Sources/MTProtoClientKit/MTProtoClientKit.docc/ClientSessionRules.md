@@ -29,8 +29,20 @@ client.invoke(…)` never sees any of it:
 - **Salts.** `bad_server_salt`, `new_session_created` and `future_salts` all
   carry a salt to adopt; the request that triggered a `bad_server_salt` is
   retried with the corrected one rather than surfaced as a failure.
-- **`bad_msg_notification`.** Codes 16, 17 and 18 mean the client's own ids were
-  wrong; the connection adjusts and retries.
+- **`bad_msg_notification`.** Codes 16/20 correct the clock and resend the
+  rejected message. Codes 17/32/33 start a fresh protocol session to reset the
+  message-id or sequence counter, then resend all pending queries and explicit
+  pings. Malformed-message codes (18/19/34/35/64) remain fatal. See Telegram's
+  [service-message rules](https://core.telegram.org/mtproto/service_messages_about_messages).
+- **Explicit pings.** ``MTProtoClientConnection/ping()`` retains its `ping_id`
+  across salt, clock, sequence and new-session recovery, while tracking each new
+  outbound `msg_id`. Its original `requestTimeout` deadline is never extended by
+  resends; a pong, timeout, or disconnect completes the waiter only once.
+  Keepalive pings, acknowledgements, salt refreshes and graceful session teardown
+  have no waiting caller; their existing best-effort/periodic behavior remains.
+- **Transport errors.** Server error frames such as `-404` (unknown auth key)
+  reach callers as ``MTProtoClientError/protocolError(_:)``, even when the frame
+  decoder reports them through the channel's error path.
 - **Acknowledgements.** Received messages are acknowledged in batched `msgs_ack`
   rather than one at a time.
 - **Liveness.** ``MTProtoClientConfiguration/pingInterval`` drives

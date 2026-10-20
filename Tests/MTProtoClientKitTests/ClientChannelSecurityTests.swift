@@ -2,11 +2,36 @@ import MTProtoCrypto
 import NIOCore
 import NIOEmbedded
 import NIOMTProtoEncryption
+import NIOMTProtoTransport
 import Testing
 
 @testable import MTProtoClientKit
 
 @Suite struct ClientChannelSecurityTests {
+  @Test(arguments: [Int32(-404), -429, -444])
+  func preservesFramedServerErrors(code: Int32) async throws {
+    let connection = MTProtoClientConnection(
+      configuration: .init(
+        rsaPublicKey: RSAPublicKey(testRSAKey),
+        resumeSession: .init(authKey: NIOMTProtoEncryption.randomData(256), serverSalt: 0),
+        pingInterval: nil, requestTimeout: .seconds(1)))
+    let channel = try await NIOAsyncTestingChannel { channel in
+      try channel.pipeline.syncOperations.addHandlers([
+        ByteToMessageHandler(MTProtoFrameDecoder(transport: .intermediate)),
+        MTProtoClientChannelHandler(connection: connection),
+      ])
+    }
+    try await channel.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: 1))
+    let ping = Task { try await connection.ping() }
+    let _: ByteBuffer = try await channel.waitForOutboundWrite()
+    var frame = channel.allocator.buffer(capacity: 8)
+    frame.writeInteger(Int32(4), endianness: .little)
+    frame.writeInteger(code, endianness: .little)
+    try await channel.writeInbound(frame)
+    await #expect(throws: MTProtoClientError.protocolError(code)) { try await ping.value }
+    _ = try await channel.finish(acceptAlreadyClosed: true)
+  }
+
   @Test(arguments: [true, false])
   func closesWhenInboundProcessingBacklogExceedsLimit(bytesLimit: Bool) async throws {
     let connection = MTProtoClientConnection(
