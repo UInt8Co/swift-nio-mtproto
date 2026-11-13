@@ -13,7 +13,7 @@ TCP framing and obfuscation, the auth-key handshake, the encrypted-message
 session, and a client that sits on top.
 
 ```swift
-.package(url: "https://github.com/UInt8Co/swift-nio-mtproto", from: "1.0.0")
+.package(url: "https://github.com/UInt8Co/swift-nio-mtproto", from: "2.0.0")
 ```
 
 ## What this is

@@ -11,7 +11,7 @@ let package = Package(
     .library(name: "MTProtoClientKit", targets: ["MTProtoClientKit"]),
   ],
   dependencies: [
-    .package(url: "https://github.com/UInt8Co/swift-mtproto.git", from: "2.0.0"),
+    .package(url: "https://github.com/UInt8Co/swift-mtproto.git", from: "3.0.0"),
     .package(url: "https://github.com/apple/swift-crypto.git", from: "5.0.0"),
     .package(url: "https://github.com/apple/swift-nio.git", from: "2.103.0"),
   ],
