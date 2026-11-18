@@ -120,8 +120,10 @@ public struct MTProtoFrameDecoder: ByteToMessageDecoder {
     guard buffer.readableBytes >= length else { return .needMoreData }
 
     // CRC32 is computed over everything but the trailing CRC word itself.
-    let checked = buffer.getBytes(at: start, length: length - 4)!
-    let expected = CRC32.checksum(of: checked)
+    // `start` is the reader index, so the frame is the head of the readable bytes.
+    let expected = buffer.withUnsafeReadableBytes {
+      CRC32.checksum(of: UnsafeRawBufferPointer(rebasing: $0[..<(length - 4)]))
+    }
     let found = buffer.getInteger(at: start + length - 4, endianness: .little, as: UInt32.self)!
     guard expected == found else {
       throw MTProtoTransportError.crcMismatch(expected: expected, found: found)

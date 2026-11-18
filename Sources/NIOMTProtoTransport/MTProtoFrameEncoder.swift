@@ -40,11 +40,17 @@ public final class MTProtoFrameEncoder: ChannelOutboundHandler {
         "\(transport) requires a 4-byte-aligned MTProto payload, got \(payload.readableBytes) bytes"
       )
     }
-    var out = context.channel.allocator.buffer(capacity: payload.readableBytes + 12)
+    // One buffer per frame, sized for the whole of it up front so that it never
+    // has to grow, which would copy what is already written. A frame stays one
+    // buffer because a handler below may send each buffer as a message of its
+    // own (a WebSocket frame), and peers read one MTProto packet per message.
+    let padding = transport == .paddedIntermediate ? Int(rng.next() % 16) : 0  // 0...15 bytes
+    var out = context.channel.allocator.buffer(
+      capacity: payload.readableBytes + transport.maximumFrameOverhead + padding)
     switch transport {
     case .abridged: encodeAbridged(payload, into: &out)
     case .intermediate: encodeIntermediate(payload, into: &out)
-    case .paddedIntermediate: encodePaddedIntermediate(payload, into: &out)
+    case .paddedIntermediate: encodePaddedIntermediate(payload, padding: padding, into: &out)
     case .full: encodeFull(payload, into: &out)
     }
     context.write(wrapOutboundOut(out), promise: promise)
@@ -70,8 +76,9 @@ public final class MTProtoFrameEncoder: ChannelOutboundHandler {
     out.writeImmutableBuffer(payload)
   }
 
-  private func encodePaddedIntermediate(_ payload: ByteBuffer, into out: inout ByteBuffer) {
-    let padding = Int(rng.next() % 16)  // 0...15 random bytes
+  private func encodePaddedIntermediate(
+    _ payload: ByteBuffer, padding: Int, into out: inout ByteBuffer
+  ) {
     out.writeInteger(UInt32(payload.readableBytes + padding), endianness: .little)
     out.writeImmutableBuffer(payload)
     for _ in 0..<padding {
@@ -86,8 +93,19 @@ public final class MTProtoFrameEncoder: ChannelOutboundHandler {
     out.writeInteger(sendSequence, endianness: .little)
     out.writeImmutableBuffer(payload)
     // CRC32 over the bytes written so far (length + seqno + payload).
-    let crc = CRC32.checksum(of: out.readableBytesView)
+    let crc = out.withUnsafeReadableBytes { CRC32.checksum(of: $0) }
     out.writeInteger(crc, endianness: .little)
     sendSequence &+= 1
+  }
+}
+
+extension MTProtoTransport {
+  /// The most bytes a frame of this transport adds around its payload, random
+  /// padding aside.
+  fileprivate var maximumFrameOverhead: Int {
+    switch self {
+    case .abridged, .intermediate, .paddedIntermediate: return 4
+    case .full: return 12
+    }
   }
 }
