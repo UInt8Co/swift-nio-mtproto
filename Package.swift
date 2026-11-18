@@ -29,7 +29,9 @@ let package = Package(
         .product(name: "NIOCore", package: "swift-nio"),
         .product(name: "Crypto", package: "swift-crypto"),
         .product(name: "CryptoExtras", package: "swift-crypto"),
-      ]
+      ],
+      // `AESCTRStream` binds BoringSSL's AES-CTR with `@_extern(c)`.
+      swiftSettings: [.enableExperimentalFeature("Extern")]
     ),
     .testTarget(
       name: "NIOMTProtoTransportTests",

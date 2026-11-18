@@ -99,37 +99,45 @@ public final class MTProtoObfuscationHandler: ChannelDuplexHandler {
   }
 
   public func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-    guard decrypt != nil else {
+    let buffer = unwrapInboundIn(data)
+    guard decrypt != nil, buffer.readableBytes > 0 else {
       context.fireChannelRead(data)
       return
     }
-    var buffer = unwrapInboundIn(data)
-    guard buffer.readableBytes > 0 else {
-      context.fireChannelRead(data)
-      return
-    }
-    let ciphertext = buffer.readBytes(length: buffer.readableBytes)!
-    let plaintext = decrypt!.apply(ciphertext)
-    var out = context.channel.allocator.buffer(capacity: plaintext.count)
-    out.writeBytes(plaintext)
-    context.fireChannelRead(wrapInboundOut(out))
+    let plaintext = Self.apply(&decrypt!, to: buffer, allocator: context.channel.allocator)
+    context.fireChannelRead(wrapInboundOut(plaintext))
   }
 
   public func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?)
   {
-    guard encrypt != nil else {
+    let buffer = unwrapOutboundIn(data)
+    guard encrypt != nil, buffer.readableBytes > 0 else {
       context.write(data, promise: promise)
       return
     }
-    var buffer = unwrapOutboundIn(data)
-    guard buffer.readableBytes > 0 else {
-      context.write(data, promise: promise)
-      return
+    let ciphertext = Self.apply(&encrypt!, to: buffer, allocator: context.channel.allocator)
+    context.write(wrapOutboundOut(ciphertext), promise: promise)
+  }
+
+  /// Runs `buffer`'s readable bytes through `stream` into a new buffer: one
+  /// allocation, and one pass that reads the input and writes the output.
+  ///
+  /// Not in place, because a buffer that arrives through the pipeline is never
+  /// this handler's alone: the `NIOAny` it came in still holds it, and a read
+  /// buffer also belongs to the channel's receive pool, which reuses it for
+  /// the next read when nobody kept it. Writing to it would have NIO copy all
+  /// of it aside first.
+  private static func apply(
+    _ stream: inout AESCTRStream, to buffer: ByteBuffer, allocator: ByteBufferAllocator
+  ) -> ByteBuffer {
+    let count = buffer.readableBytes
+    var out = allocator.buffer(capacity: count)
+    buffer.withUnsafeReadableBytes { input in
+      _ = out.writeWithUnsafeMutableBytes(minimumWritableBytes: count) { output in
+        stream.apply(input, into: output)
+        return count
+      }
     }
-    let plaintext = buffer.readBytes(length: buffer.readableBytes)!
-    let ciphertext = encrypt!.apply(plaintext)
-    var out = context.channel.allocator.buffer(capacity: ciphertext.count)
-    out.writeBytes(ciphertext)
-    context.write(wrapOutboundOut(out), promise: promise)
+    return out
   }
 }

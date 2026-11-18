@@ -375,6 +375,43 @@ private let longPlain = pattern(100_003, seed: 5)
   #expect(head + copy.apply(Array(longPlain[21..<64])) == expected)
 }
 
+/// The span forms are the array form without the arrays: the same bytes, the
+/// same state afterwards, and they can be mixed call by call.
+@Test func keystreamSpanFormsMatchTheArrayForm() {
+  let iv = Data(hex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"))
+  var whole = AESCTRStream(key: Data(key), iv: iv)
+  let expected = whole.apply(longPlain)
+
+  for size in [1, 5, 16, 17, 100, 4099] {
+    var stream = AESCTRStream(key: Data(key), iv: iv)
+    var out: [UInt8] = []
+    out.reserveCapacity(longPlain.count)
+    for (index, chunk) in chunks(longPlain, of: size).enumerated() {
+      var piece = Array(chunk)
+      switch index % 3 {
+      case 0:
+        piece = stream.apply(piece)
+      case 1:
+        var typed = piece.mutableSpan
+        var span = typed.mutableBytes
+        stream.apply(inPlace: &span)
+      default:
+        // Into storage longer than the input: only the input's length is written.
+        var target = [UInt8](repeating: 0xa5, count: piece.count + 3)
+        do {
+          var typed = target.mutableSpan
+          var span = typed.mutableBytes
+          stream.apply(piece.span.bytes, into: &span)
+        }
+        #expect(target[piece.count...].allSatisfy { $0 == 0xa5 })
+        piece = Array(target[..<piece.count])
+      }
+      out += piece
+    }
+    #expect(out == expected, "\(size)-byte calls")
+  }
+}
+
 // MARK: - Obfuscation: exact bytes in both directions
 
 /// A deterministic 64-byte init payload that satisfies the preamble rules.
