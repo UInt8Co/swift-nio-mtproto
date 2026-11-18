@@ -56,22 +56,17 @@ public enum MTProtoEncryptedMessage {
     guard data.count >= 24, (data.count - 24) % 16 == 0, data.count > 24 else {
       throw DecodeError.tooShort
     }
-    let bytes = [UInt8](data)
-    let msgKey = Data(bytes[8..<24])
-    let encrypted = Data(bytes[24...])
+    let msgKey = data.subdata(in: (data.startIndex + 8)..<(data.startIndex + 24))
 
-    let (key, iv) = MTProtoMessageCrypto.aesKeyIV(
-      authKey: authKey, msgKey: msgKey, direction: direction)
-    let plaintext = try AESIGE.decrypt(encrypted, key: key, iv: iv)
-
-    // Verify msg_key = middle128(SHA256(authKey[88..120] ‖ plaintext)). The
-    // comparison is constant-time: msg_key authenticates the message, so its
-    // verification must not leak where it first differs.
-    let expectedMsgKey = MTProtoMessageCrypto.messageKey(
-      authKey: authKey, plaintext: plaintext, direction: direction)
-    guard MTProtoConstantTime.equals(expectedMsgKey, msgKey) else {
-      throw DecodeError.msgKeyMismatch
-    }
+    // Decrypt straight from the envelope into the plaintext's own storage, and
+    // verify msg_key = middle128(SHA256(authKey[88..120] ‖ plaintext)) there.
+    // The comparison is constant-time: msg_key authenticates the message, so
+    // its verification must not leak where it first differs.
+    var plaintext = Data(count: data.count - 24)
+    let authentic = try decrypt(
+      data.bytes.extracting(24...), msgKey: msgKey, into: &plaintext, authKey: authKey,
+      direction: direction)
+    guard authentic else { throw DecodeError.msgKeyMismatch }
 
     var reader = TLReader(plaintext)
     let salt = try reader.readInt64()
@@ -100,31 +95,48 @@ public enum MTProtoEncryptedMessage {
     direction: MTProtoMessageCrypto.Direction = .fromServer,
     randomPadding: (Int) -> Data = randomData
   ) throws -> Data {
-    var inner = TLWriter()
-    inner.writeInt64(salt)
-    inner.writeInt64(sessionID)
-    inner.writeInt64(msgID)
-    inner.writeInt32(seqNo)
-    inner.writeInt32(Int32(body.count))
-    inner.writeRawData(body)
+    var head = TLWriter(capacity: 32)
+    head.writeInt64(salt)
+    head.writeInt64(sessionID)
+    head.writeInt64(msgID)
+    head.writeInt32(seqNo)
+    head.writeInt32(Int32(body.count))
     // MTProto 2.0 padding: 12–1024 bytes, total length a multiple of 16.
-    let unpadded = inner.data.count
+    let unpadded = head.data.count + body.count
     var padLength = 16 - (unpadded % 16)
     if padLength < 12 { padLength += 16 }
-    inner.writeRawData(randomPadding(padLength))
+    let padding = randomPadding(padLength)
 
-    let plaintext = inner.data
-    let msgKey = MTProtoMessageCrypto.messageKey(
-      authKey: authKey, plaintext: plaintext, direction: direction)
-    let (key, iv) = MTProtoMessageCrypto.aesKeyIV(
-      authKey: authKey, msgKey: msgKey, direction: direction)
-    let encrypted = try AESIGE.encrypt(plaintext, key: key, iv: iv)
+    // The envelope is allocated once and the ciphertext written into its
+    // tail, from the header, the body and the padding where they already are.
+    var out = Data(count: 24 + unpadded + padding.count)
+    let msgKey = try encrypt(
+      head: head.data.bytes, body: body.bytes, tail: padding.bytes, intoTailOf: &out,
+      authKey: authKey, direction: direction)
+    withUnsafeBytes(of: authKeyID.littleEndian) { out.replaceSubrange(0..<8, with: $0) }
+    out.replaceSubrange(8..<24, with: msgKey)
+    return out
+  }
 
-    var out = TLWriter()
-    out.writeInt64(authKeyID)
-    out.writeRawData(msgKey)
-    out.writeRawData(encrypted)
-    return out.data
+  /// Encrypts into `envelope` from byte 24 on, after `auth_key_id ‖ msg_key`.
+  private static func encrypt(
+    head: RawSpan, body: RawSpan, tail: RawSpan, intoTailOf envelope: inout Data,
+    authKey: Data, direction: MTProtoMessageCrypto.Direction
+  ) throws -> Data {
+    var whole = envelope.mutableBytes
+    var ciphertext = whole._mutatingExtracting(24...)
+    return try MTProtoMessageCrypto.encrypt(
+      head: head, body: body, tail: tail, into: &ciphertext, authKey: authKey,
+      direction: direction)
+  }
+
+  private static func decrypt(
+    _ ciphertext: RawSpan, msgKey: Data, into plaintext: inout Data, authKey: Data,
+    direction: MTProtoMessageCrypto.Direction
+  ) throws -> Bool {
+    var output = plaintext.mutableBytes
+    return try MTProtoMessageCrypto.decrypt(
+      ciphertext, msgKey: msgKey, into: &output, authKey: authKey, direction: direction)
   }
 }
 
