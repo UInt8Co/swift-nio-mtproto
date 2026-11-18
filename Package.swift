@@ -11,7 +11,7 @@ let package = Package(
     .library(name: "MTProtoClientKit", targets: ["MTProtoClientKit"]),
   ],
   dependencies: [
-    .package(url: "https://github.com/UInt8Co/swift-mtproto.git", from: "3.0.0"),
+    .package(url: "https://github.com/UInt8Co/swift-mtproto.git", from: "3.1.0"),
     .package(url: "https://github.com/apple/swift-crypto.git", from: "5.0.0"),
     .package(url: "https://github.com/apple/swift-nio.git", from: "2.103.0"),
   ],
@@ -38,6 +38,8 @@ let package = Package(
         .product(name: "MTProtoUtils", package: "swift-mtproto"),
         .product(name: "NIOCore", package: "swift-nio"),
         .product(name: "NIOEmbedded", package: "swift-nio"),
+        .product(name: "Crypto", package: "swift-crypto"),
+        .product(name: "CryptoExtras", package: "swift-crypto"),
       ]
     ),
     // The MTProto message layer: the encrypted-message envelope, the DH
